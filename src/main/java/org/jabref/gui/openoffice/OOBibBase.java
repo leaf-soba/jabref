@@ -66,7 +66,7 @@ import org.slf4j.LoggerFactory;
 public class OOBibBase {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(OOBibBase.class);
-
+    private static final String ERROR_TITLE_STRING = "Could not insert citation";
     private final DialogService dialogService;
 
     private final boolean alwaysAddCitedOnPages;
@@ -155,10 +155,6 @@ public class OOBibBase {
         err.showErrorDialog(dialogService);
     }
 
-    void showDialog(String errorTitle, OOError err) {
-        err.setTitle(errorTitle).showErrorDialog(dialogService);
-    }
-
     OOVoidResult<OOError> collectResults(String errorTitle, List<OOVoidResult<OOError>> results) {
         String msg = results.stream()
                             .filter(OOVoidResult::isError)
@@ -179,10 +175,6 @@ public class OOBibBase {
         return res.ifError(e -> showDialog(e.setTitle(errorTitle))).isError();
     }
 
-    boolean testDialog(String errorTitle, List<OOVoidResult<OOError>> results) {
-        return testDialog(errorTitle, collectResults(errorTitle, results));
-    }
-
     @SafeVarargs
     final boolean testDialog(String errorTitle, OOVoidResult<OOError>... results) {
         List<OOVoidResult<OOError>> resultList = Arrays.asList(results);
@@ -192,7 +184,7 @@ public class OOBibBase {
     /**
      * Get the cursor positioned by the user for inserting text.
      */
-    OOResult<XTextCursor, OOError> getUserCursorForTextInsertion(XTextDocument doc, String errorTitle) {
+    OOResult<XTextCursor, OOError> getUserCursorForTextInsertion(XTextDocument doc) {
         // Get the cursor positioned by the user.
         XTextCursor cursor = UnoCursor.getViewCursor(doc).orElse(null);
 
@@ -205,7 +197,7 @@ public class OOBibBase {
                     Localization.lang("Please move the cursor"
                             + " to the location for the new citation.") + "\n"
                             + Localization.lang("I cannot insert to the cursor's current location.");
-            return OOResult.error(new OOError(errorTitle, msg, ex));
+            return OOResult.error(new OOError(ERROR_TITLE_STRING, msg, ex));
         }
         return OOResult.ok(cursor);
     }
@@ -514,6 +506,53 @@ public class OOBibBase {
         }
     }
 
+    record GUIGroup(OOResult<XTextDocument, OOError> odoc, XTextDocument doc, OOResult<OOFrontend, OOError> frontend,
+                    OOResult<XTextCursor, OOError> cursor, OOResult<FunctionalTextViewCursor, OOError> fcursor,
+                    Boolean isEarlyReturn) {
+    }
+    private GUIGroup getGUIGroup(List<BibEntry> entries,
+                                 OOStyle style,
+                                 Optional<Update.SyncOptions> syncOptions) {
+        OOResult<XTextDocument, OOError> odoc = getXTextDocument();
+        if (testDialog(ERROR_TITLE_STRING,
+                odoc.asVoidResult(),
+                styleIsRequired(style),
+                selectedBibEntryIsRequired(entries, OOError::noEntriesSelectedForCitation))) {
+            return null;
+        }
+        XTextDocument doc = odoc.get();
+
+        OOResult<OOFrontend, OOError> frontend = getFrontend(doc);
+        if (testDialog(ERROR_TITLE_STRING, frontend.asVoidResult())) {
+            return null;
+        }
+
+        OOResult<XTextCursor, OOError> cursor = getUserCursorForTextInsertion(doc);
+        if (testDialog(ERROR_TITLE_STRING, cursor.asVoidResult()) ||
+                testDialog(ERROR_TITLE_STRING, checkRangeOverlapsWithCursor(doc, frontend.get()))) {
+            return null;
+        }
+
+        if (style instanceof JStyle jStyle && testDialog(ERROR_TITLE_STRING,
+                checkStylesExistInTheDocument(jStyle, doc),
+                checkIfOpenOfficeIsRecordingChanges(doc))) {
+            return null;
+        }
+
+        /*
+         * For sync we need a FunctionalTextViewCursor and an open database.
+         */
+        OOResult<FunctionalTextViewCursor, OOError> fcursor = null;
+        if (syncOptions.isPresent()) {
+            fcursor = getFunctionalTextViewCursor(doc, ERROR_TITLE_STRING);
+            if (testDialog(ERROR_TITLE_STRING, fcursor.asVoidResult()) || testDialog(databaseIsRequired(syncOptions.get().databases,
+                    OOError::noDataBaseIsOpenForSyncingAfterCitation))) {
+                return null;
+            }
+        }
+        return new GUIGroup(odoc, doc, frontend, cursor, fcursor, false);
+    }
+
     /**
      * Creates a citation group from {@code entries} at the cursor.
      * <p>
@@ -538,70 +577,28 @@ public class OOBibBase {
                                      String pageInfo,
                                      Optional<Update.SyncOptions> syncOptions) {
 
-        final String errorTitle = "Could not insert citation";
-
-        OOResult<XTextDocument, OOError> odoc = getXTextDocument();
-        if (testDialog(errorTitle,
-                odoc.asVoidResult(),
-                styleIsRequired(style),
-                selectedBibEntryIsRequired(entries, OOError::noEntriesSelectedForCitation))) {
+        GUIGroup guiGroup = getGUIGroup(entries, style, syncOptions);
+        if (guiGroup == null) {
             return;
-        }
-        XTextDocument doc = odoc.get();
-
-        OOResult<OOFrontend, OOError> frontend = getFrontend(doc);
-        if (testDialog(errorTitle, frontend.asVoidResult())) {
-            return;
-        }
-
-        OOResult<XTextCursor, OOError> cursor = getUserCursorForTextInsertion(doc, errorTitle);
-        if (testDialog(errorTitle, cursor.asVoidResult())) {
-            return;
-        }
-
-        if (testDialog(errorTitle, checkRangeOverlapsWithCursor(doc, frontend.get()))) {
-            return;
-        }
-
-        if (style instanceof JStyle jStyle) {
-            if (testDialog(errorTitle,
-                    checkStylesExistInTheDocument(jStyle, doc),
-                    checkIfOpenOfficeIsRecordingChanges(doc))) {
-                return;
-            }
-        }
-
-        /*
-         * For sync we need a FunctionalTextViewCursor and an open database.
-         */
-        OOResult<FunctionalTextViewCursor, OOError> fcursor = null;
-        if (syncOptions.isPresent()) {
-            fcursor = getFunctionalTextViewCursor(doc, errorTitle);
-            if (testDialog(errorTitle, fcursor.asVoidResult()) || testDialog(databaseIsRequired(syncOptions.get().databases,
-                    OOError::noDataBaseIsOpenForSyncingAfterCitation))) {
-                return;
-            }
         }
 
         syncOptions.map(e -> e.setAlwaysAddCitedOnPages(this.alwaysAddCitedOnPages));
 
         try {
 
-            UnoUndo.enterUndoContext(doc, "Insert citation");
+            UnoUndo.enterUndoContext(guiGroup.doc(), "Insert citation");
             if (style instanceof CitationStyle citationStyle) {
                 // Handle insertion of CSL Style citations
 
-                initializeCitationAdapter(doc);
+                initializeCitationAdapter(guiGroup.doc());
 
-                if (citationType == CitationType.AUTHORYEAR_PAR) {
+                switch (citationType) {
                     // "Cite" button
-                    this.cslCitationOOAdapter.insertCitation(cursor.get(), citationStyle, entries, bibDatabaseContext, bibEntryTypesManager);
-                } else if (citationType == CitationType.AUTHORYEAR_INTEXT) {
+                    case AUTHORYEAR_PAR -> this.cslCitationOOAdapter.insertCitation(guiGroup.cursor().get(), citationStyle, entries, bibDatabaseContext, bibEntryTypesManager);
                     // "Cite in-text" button
-                    this.cslCitationOOAdapter.insertInTextCitation(cursor.get(), citationStyle, entries, bibDatabaseContext, bibEntryTypesManager);
-                } else if (citationType == CitationType.INVISIBLE_CIT) {
+                    case AUTHORYEAR_INTEXT -> this.cslCitationOOAdapter.insertInTextCitation(guiGroup.cursor().get(), citationStyle, entries, bibDatabaseContext, bibEntryTypesManager);
                     // "Insert empty citation"
-                    this.cslCitationOOAdapter.insertEmpty(cursor.get(), citationStyle, entries);
+                    case INVISIBLE_CIT -> this.cslCitationOOAdapter.insertEmpty(guiGroup.cursor().get(), citationStyle, entries);
                 }
 
                 // If "Automatically sync bibliography when inserting citations" is enabled
@@ -609,9 +606,9 @@ public class OOBibBase {
             } else if (style instanceof JStyle jStyle) {
                 // Handle insertion of JStyle citations
 
-                EditInsert.insertCitationGroup(doc,
-                        frontend.get(),
-                        cursor.get(),
+                EditInsert.insertCitationGroup(guiGroup.doc(),
+                        guiGroup.frontend().get(),
+                        guiGroup.cursor().get(),
                         entries,
                         bibDatabaseContext.getDatabase(),
                         jStyle,
@@ -619,13 +616,13 @@ public class OOBibBase {
                         pageInfo);
 
                 if (syncOptions.isPresent()) {
-                    Update.resyncDocument(doc, jStyle, fcursor.get(), syncOptions.get());
+                    Update.resyncDocument(guiGroup.doc(), jStyle, guiGroup.fcursor().get(), syncOptions.get());
                 }
             }
         } catch (NoDocumentException ex) {
-            OOError.from(ex).setTitle(errorTitle).showErrorDialog(dialogService);
+            OOError.from(ex).setTitle(ERROR_TITLE_STRING).showErrorDialog(dialogService);
         } catch (DisposedException ex) {
-            OOError.from(ex).setTitle(errorTitle).showErrorDialog(dialogService);
+            OOError.from(ex).setTitle(ERROR_TITLE_STRING).showErrorDialog(dialogService);
         } catch (CreationException
                  | WrappedTargetException
                  | IOException
@@ -633,11 +630,11 @@ public class OOBibBase {
                  | IllegalTypeException
                  | NotRemoveableException ex) {
             LOGGER.warn("Could not insert entry", ex);
-            OOError.fromMisc(ex).setTitle(errorTitle).showErrorDialog(dialogService);
+            OOError.fromMisc(ex).setTitle(ERROR_TITLE_STRING).showErrorDialog(dialogService);
         } catch (Exception e) {
             throw new RuntimeException(e);
         } finally {
-            UnoUndo.leaveUndoContext(doc);
+            UnoUndo.leaveUndoContext(guiGroup.doc());
         }
     }
 
